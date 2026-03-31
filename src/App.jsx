@@ -296,37 +296,50 @@ export default function App() {
     return ()=>clearInterval(t);
   },[]);
 
-  // ── Pending item reminder (every 15–30 s) ──────────────────────────────────
+  // ── Pending item reminder (every 10 s) ────────────────────────────────────
+  const reminderIdxRef = useRef(0);
   useEffect(()=>{
-    let timeoutId;
-    function scheduleNext(){
-      const delay = (15 + Math.random() * 15) * 1000; // 15–30 s
-      timeoutId = setTimeout(()=>{
-        if("Notification" in window && Notification.permission === "granted"){
-          // Collect all pending items
-          const pending = [];
-          tasksRef.current.filter(t=>!t.done).forEach(t=>{
-            pending.push({ title:"📋 " + t.title, body:`[${t.section === "morning" ? "Morning" : "Work"} task${t.time ? " · " + t.time : ""}] — Mark it done!` });
+    const interval = setInterval(()=>{
+      if(!("Notification" in window) || Notification.permission !== "granted") return;
+
+      // Build full pending list: tasks first, then habits
+      const pending = [];
+      tasksRef.current.filter(t=>!t.done).forEach(t=>{
+        pending.push({
+          title: "📋 " + t.title,
+          body:  `${t.section === "morning" ? "Morning" : "Work"} task${t.time ? " · " + t.time : ""} — tap to open tracker`,
+        });
+      });
+      ALL_DAILY_HABITS.forEach(h=>{
+        if(!habitsRef.current[h.id]){
+          pending.push({
+            title: "✅ Habit not done yet",
+            body:  h.label + " — tap to mark complete",
           });
-          ALL_DAILY_HABITS.forEach(h=>{
-            if(!habitsRef.current[h.id]){
-              pending.push({ title:"✅ Habit pending", body:h.label + " — not checked yet!" });
-            }
-          });
-          if(pending.length > 0){
-            const pick = pending[Math.floor(Math.random() * pending.length)];
-            new Notification(pick.title, {
-              body: pick.body,
-              icon: "https://em-content.zobj.net/source/apple/391/memo_1f4dd.png",
-              tag:  "pending-reminder", // replaces previous reminder, no spam stack
-            });
-          }
         }
-        scheduleNext(); // chain next
-      }, delay);
-    }
-    scheduleNext();
-    return ()=>clearTimeout(timeoutId);
+      });
+
+      if(pending.length === 0) return; // everything done — no notification
+
+      // Cycle through items in order so every pending thing gets surfaced
+      const idx = reminderIdxRef.current % pending.length;
+      reminderIdxRef.current = idx + 1;
+      const pick = pending[idx];
+
+      const n = new Notification("Satyam · Daily Tracker", {
+        body:             pick.title + "\n" + pick.body,
+        icon:             "/vite.svg",
+        badge:            "/vite.svg",
+        tag:              "pending-reminder",   // replaces previous — no pile-up
+        renotify:         true,                  // re-fires sound/vibration each time
+        requireInteraction: false,               // auto-dismiss after OS default time
+        silent:           false,                 // play system sound
+      });
+      // Clicking the notification focuses the tab
+      n.onclick = ()=>{ window.focus(); n.close(); };
+    }, 10000); // exactly 10 seconds
+
+    return ()=>clearInterval(interval);
   },[]);
 
   function triggerAlarm(id){
