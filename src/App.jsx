@@ -280,67 +280,111 @@ export default function App() {
 
   useEffect(()=>{ const t=setInterval(()=>setClock(clockDisplay()),5000); return ()=>clearInterval(t); },[]);
 
-  // ── Auto-request notification permission on first load ─────────────────────
+  // ── Service Worker registration ────────────────────────────────────────────
+  const swRegRef = useRef(null);
   useEffect(()=>{
-    if("Notification" in window && Notification.permission === "default"){
-      Notification.requestPermission().then(p=>setNotifPerm(p));
+    if(!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("/sw.js").then(reg=>{
+      swRegRef.current = reg;
+    }).catch(err=>console.warn("SW reg failed:", err));
+  },[]);
+
+  // ── Helper: build the current pending list ────────────────────────────────
+  function buildPending(){
+    const list = [];
+    tasksRef.current.filter(t=>!t.done).forEach(t=>{
+      list.push({
+        title: "📋 " + t.title,
+        body:  `${t.section==="morning"?"Morning":"Work"} task${t.time?" · "+t.time:""} — tap to open tracker`,
+      });
+    });
+    ALL_DAILY_HABITS.forEach(h=>{
+      if(!habitsRef.current[h.id]){
+        list.push({ title:"✅ Habit not done yet", body: h.label+" — tap to mark complete" });
+      }
+    });
+    return list;
+  }
+
+  // ── Helper: show one notification (via SW if available, else fallback) ────
+  async function showNotif(title, body){
+    if(!("Notification" in window) || Notification.permission !== "granted") return;
+    const reg = swRegRef.current;
+    if(reg){
+      await reg.showNotification(title, {
+        body, icon:"/vite.svg", badge:"/vite.svg",
+        tag:"pending-reminder", renotify:true, silent:false,
+      });
+    } else {
+      // Fallback for browsers without SW support
+      const n = new Notification(title, { body, icon:"/vite.svg", tag:"pending-reminder", renotify:true });
+      n.onclick = ()=>{ window.focus(); n.close(); };
     }
-  },[]);
+  }
 
-  // ── Alarm tick ─────────────────────────────────────────────────────────────
+  // ── Auto-request notification permission + start SW reminders ─────────────
   useEffect(()=>{
-    const t=setInterval(()=>{
-      const hhmm=nowHHMM();
-      setAlarms(prev=>prev.map(a=>{ if(a.enabled&&a.time===hhmm&&!a.ringing){ triggerAlarm(a.id); return {...a,ringing:true}; } return a; }));
-    },30000);
-    return ()=>clearInterval(t);
-  },[]);
+    async function init(){
+      if(!("Notification" in window)) return;
+      let perm = Notification.permission;
+      if(perm === "default") perm = await Notification.requestPermission();
+      setNotifPerm(perm);
+      if(perm !== "granted") return;
+      // Kick off SW background reminder loop
+      if(swRegRef.current){
+        swRegRef.current.active?.postMessage({ type:"START_REMINDERS", pending: buildPending() });
+      }
+    }
+    // Delay slightly so SW has time to register
+    const t = setTimeout(init, 1500);
+    return ()=>clearTimeout(t);
+  },[]);// eslint-disable-line
 
-  // ── Pending item reminder (every 10 s) ────────────────────────────────────
+  // ── In-page reminder every 10 s (tab visible) ─────────────────────────────
   const reminderIdxRef = useRef(0);
   useEffect(()=>{
     const interval = setInterval(()=>{
       if(!("Notification" in window) || Notification.permission !== "granted") return;
-
-      // Build full pending list: tasks first, then habits
-      const pending = [];
-      tasksRef.current.filter(t=>!t.done).forEach(t=>{
-        pending.push({
-          title: "📋 " + t.title,
-          body:  `${t.section === "morning" ? "Morning" : "Work"} task${t.time ? " · " + t.time : ""} — tap to open tracker`,
-        });
-      });
-      ALL_DAILY_HABITS.forEach(h=>{
-        if(!habitsRef.current[h.id]){
-          pending.push({
-            title: "✅ Habit not done yet",
-            body:  h.label + " — tap to mark complete",
-          });
-        }
-      });
-
-      if(pending.length === 0) return; // everything done — no notification
-
-      // Cycle through items in order so every pending thing gets surfaced
-      const idx = reminderIdxRef.current % pending.length;
+      const pending = buildPending();
+      if(pending.length === 0) return;
+      const idx   = reminderIdxRef.current % pending.length;
       reminderIdxRef.current = idx + 1;
-      const pick = pending[idx];
-
-      const n = new Notification("Satyam · Daily Tracker", {
-        body:             pick.title + "\n" + pick.body,
-        icon:             "/vite.svg",
-        badge:            "/vite.svg",
-        tag:              "pending-reminder",   // replaces previous — no pile-up
-        renotify:         true,                  // re-fires sound/vibration each time
-        requireInteraction: false,               // auto-dismiss after OS default time
-        silent:           false,                 // play system sound
-      });
-      // Clicking the notification focuses the tab
-      n.onclick = ()=>{ window.focus(); n.close(); };
-    }, 10000); // exactly 10 seconds
-
+      const pick  = pending[idx];
+      showNotif("Satyam · Daily Tracker 🗒", pick.title + "\n" + pick.body);
+    }, 10000);
     return ()=>clearInterval(interval);
-  },[]);
+  },[]);// eslint-disable-line
+
+  // ── Keep SW in sync whenever tasks/habits change ──────────────────────────
+  useEffect(()=>{
+    if(!swRegRef.current) return;
+    swRegRef.current.active?.postMessage({ type:"UPDATE_PENDING", pending: buildPending() });
+  },[tasks, dailyHabits]);// eslint-disable-line
+
+  // ── Hand off to SW when user leaves the page, cancel when they return ─────
+  useEffect(()=>{
+    function onVisibility(){
+      const sw = swRegRef.current?.active;
+      if(document.visibilityState === "hidden"){
+        // user left → tell SW to start its own loop
+        if(sw) sw.postMessage({ type:"START_REMINDERS", pending: buildPending() });
+      } else {
+        // user returned → SW stops, in-page interval takes over
+        if(sw) sw.postMessage({ type:"STOP_REMINDERS" });
+        // 🔔 Fire an immediate "welcome back" notification
+        const pending = buildPending();
+        if(pending.length > 0){
+          const pick = pending[reminderIdxRef.current % pending.length];
+          reminderIdxRef.current += 1;
+          showNotif("Satyam · Daily Tracker 🗒", pick.title + "\n" + pick.body);
+        }
+      }
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+    return ()=>document.removeEventListener("visibilitychange", onVisibility);
+  },[]);// eslint-disable-line
+
+
 
   function triggerAlarm(id){
     if(!audioCtx.current) audioCtx.current=new(window.AudioContext||window.webkitAudioContext)();
