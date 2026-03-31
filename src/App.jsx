@@ -270,15 +270,63 @@ export default function App() {
   const [alarms,      setAlarms]      = useState(DEFAULT_ALARMS);
   const [clock,       setClock]       = useState(clockDisplay());
   const [ringing,     setRinging]     = useState(null);
-  const audioCtx = useRef(null);
+  const [notifPerm,   setNotifPerm]   = useState("Notification" in window ? Notification.permission : "denied");
+  const audioCtx   = useRef(null);
+  // live refs so reminder interval always sees latest state without stale closures
+  const tasksRef   = useRef(tasks);
+  const habitsRef  = useRef(dailyHabits);
+  useEffect(()=>{ tasksRef.current  = tasks; },        [tasks]);
+  useEffect(()=>{ habitsRef.current = dailyHabits; },  [dailyHabits]);
 
   useEffect(()=>{ const t=setInterval(()=>setClock(clockDisplay()),5000); return ()=>clearInterval(t); },[]);
+
+  // ── Auto-request notification permission on first load ─────────────────────
+  useEffect(()=>{
+    if("Notification" in window && Notification.permission === "default"){
+      Notification.requestPermission().then(p=>setNotifPerm(p));
+    }
+  },[]);
+
+  // ── Alarm tick ─────────────────────────────────────────────────────────────
   useEffect(()=>{
     const t=setInterval(()=>{
       const hhmm=nowHHMM();
       setAlarms(prev=>prev.map(a=>{ if(a.enabled&&a.time===hhmm&&!a.ringing){ triggerAlarm(a.id); return {...a,ringing:true}; } return a; }));
     },30000);
     return ()=>clearInterval(t);
+  },[]);
+
+  // ── Pending item reminder (every 15–30 s) ──────────────────────────────────
+  useEffect(()=>{
+    let timeoutId;
+    function scheduleNext(){
+      const delay = (15 + Math.random() * 15) * 1000; // 15–30 s
+      timeoutId = setTimeout(()=>{
+        if("Notification" in window && Notification.permission === "granted"){
+          // Collect all pending items
+          const pending = [];
+          tasksRef.current.filter(t=>!t.done).forEach(t=>{
+            pending.push({ title:"📋 " + t.title, body:`[${t.section === "morning" ? "Morning" : "Work"} task${t.time ? " · " + t.time : ""}] — Mark it done!` });
+          });
+          ALL_DAILY_HABITS.forEach(h=>{
+            if(!habitsRef.current[h.id]){
+              pending.push({ title:"✅ Habit pending", body:h.label + " — not checked yet!" });
+            }
+          });
+          if(pending.length > 0){
+            const pick = pending[Math.floor(Math.random() * pending.length)];
+            new Notification(pick.title, {
+              body: pick.body,
+              icon: "https://em-content.zobj.net/source/apple/391/memo_1f4dd.png",
+              tag:  "pending-reminder", // replaces previous reminder, no spam stack
+            });
+          }
+        }
+        scheduleNext(); // chain next
+      }, delay);
+    }
+    scheduleNext();
+    return ()=>clearTimeout(timeoutId);
   },[]);
 
   function triggerAlarm(id){
@@ -397,6 +445,33 @@ export default function App() {
             ))}
           </div>
         </div>
+
+        {/* NOTIFICATION PERMISSION BANNER */}
+        {notifPerm !== "granted" && (
+          <div style={{ ...clayLight({ borderRadius:16, border:`1.5px solid ${notifPerm==="denied" ? "#FFCDD2" : C.border}`, background: notifPerm==="denied" ? "#FFF5F5" : "#FFFBEB" }), padding:"11px 16px", marginBottom:12, display:"flex", alignItems:"center", justifyContent:"space-between", gap:12 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <span style={{ fontSize:16 }}>{notifPerm==="denied" ? "🔕" : "🔔"}</span>
+              <div>
+                <div style={{ fontSize:11, fontWeight:600, color:C.dark }}>
+                  {notifPerm==="denied" ? "Notifications blocked" : "Enable reminders"}
+                </div>
+                <div style={{ fontSize:10, color:C.mid, marginTop:1 }}>
+                  {notifPerm==="denied"
+                    ? "Allow in browser settings to get task reminders"
+                    : "Get nudged every 15–30s for pending tasks & habits"}
+                </div>
+              </div>
+            </div>
+            {notifPerm !== "denied" && (
+              <button
+                onClick={()=>Notification.requestPermission().then(p=>setNotifPerm(p))}
+                style={{ ...clayActive({ borderRadius:10 }), padding:"6px 14px", border:"none", color:"#fff", fontSize:10, fontWeight:600, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap" }}
+              >
+                Enable
+              </button>
+            )}
+          </div>
+        )}
 
         {/* TAB BAR */}
         <div style={{ display:"flex", gap:4, background:C.tray, borderRadius:18, padding:5, marginBottom:12, border:`1.5px solid ${C.border}`, overflowX:"auto" }}>
