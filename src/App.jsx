@@ -271,6 +271,52 @@ export default function App() {
   const [clock,       setClock]       = useState(clockDisplay());
   const [ringing,     setRinging]     = useState(null);
   const [notifPerm,   setNotifPerm]   = useState("Notification" in window ? Notification.permission : "denied");
+
+  // ── ntfy.sh cross-device push ───────────────────────────────────────────────
+  const [ntfyTopic,   setNtfyTopic]   = useState(() => localStorage.getItem("ntfy_topic") || "");
+  const [ntfyInput,   setNtfyInput]   = useState(() => localStorage.getItem("ntfy_topic") || "");
+  const [ntfyTest,    setNtfyTest]    = useState("idle"); // idle | sending | ok | err
+
+  function saveNtfyTopic(val) {
+    const t = val.trim().replace(/[^a-zA-Z0-9_-]/g,"");
+    localStorage.setItem("ntfy_topic", t);
+    setNtfyTopic(t);
+    setNtfyInput(t);
+  }
+
+  async function sendNtfy(title, body) {
+    const topic = localStorage.getItem("ntfy_topic");
+    if (!topic) return;
+    try {
+      await fetch(`https://ntfy.sh/${topic}`, {
+        method:  "POST",
+        headers: {
+          "Title":    title,
+          "Priority": "default",
+          "Tags":     "spiral_notepad",
+          "Content-Type": "text/plain",
+        },
+        body: body,
+      });
+    } catch(e) { console.warn("ntfy send failed", e); }
+  }
+
+  async function testNtfy() {
+    const topic = ntfyInput.trim().replace(/[^a-zA-Z0-9_-]/g,"");
+    if (!topic) return;
+    saveNtfyTopic(topic);
+    setNtfyTest("sending");
+    try {
+      const r = await fetch(`https://ntfy.sh/${topic}`, {
+        method: "POST",
+        headers: { "Title": "Satyam · Tracker 🗒", "Tags": "white_check_mark", "Content-Type": "text/plain" },
+        body: "ntfy connected! You'll get task reminders on this device.",
+      });
+      setNtfyTest(r.ok ? "ok" : "err");
+    } catch { setNtfyTest("err"); }
+    setTimeout(() => setNtfyTest("idle"), 4000);
+  }
+
   const audioCtx   = useRef(null);
   // live refs so reminder interval always sees latest state without stale closures
   const tasksRef   = useRef(tasks);
@@ -366,8 +412,15 @@ export default function App() {
     function onVisibility(){
       const sw = swRegRef.current?.active;
       if(document.visibilityState === "hidden"){
-        // user left → tell SW to start its own loop
+        // user left → tell SW to start its own loop (same-device background)
         if(sw) sw.postMessage({ type:"START_REMINDERS", pending: buildPending() });
+        // 🌐 Also push via ntfy.sh so OTHER devices get the notification
+        const pending = buildPending();
+        if(pending.length > 0){
+          const pick = pending[reminderIdxRef.current % pending.length];
+          reminderIdxRef.current += 1;
+          sendNtfy("Satyam · Daily Tracker 🗒", pick.title + "\n" + pick.body);
+        }
       } else {
         // user returned → SW stops, in-page interval takes over
         if(sw) sw.postMessage({ type:"STOP_REMINDERS" });
@@ -580,6 +633,44 @@ export default function App() {
                 style={{ width:"100%", ...clayLight({ borderRadius:14 }), padding:"10px 0", border:`1.5px solid ${C.border}`, color:C.mid, fontSize:11, fontWeight:600, cursor:"pointer", fontFamily:"inherit", marginBottom:14 }}>
                 Allow notifications
               </button>
+
+              {/* ── ntfy.sh cross-device push setup ── */}
+              <div style={{ ...clayLight({ borderRadius:16, border:`1.5px solid ${ntfyTopic ? C.blue : C.border}`, background: ntfyTopic ? "#EBF3FF" : C.tray }), padding:16, marginBottom:14 }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+                  <span style={{ fontSize:20 }}>📲</span>
+                  <div>
+                    <div style={{ fontSize:11, fontWeight:700, color:C.dark }}>Cross-device push (ntfy.sh)</div>
+                    <div style={{ fontSize:10, color:C.mid, marginTop:1 }}>Get notified on your phone even when the app is closed</div>
+                  </div>
+                  {ntfyTopic && <span style={{ marginLeft:"auto", fontSize:10, fontWeight:700, color:C.blue }}>✓ Active</span>}
+                </div>
+                <div style={{ display:"flex", gap:8, marginBottom:10 }}>
+                  <input
+                    value={ntfyInput}
+                    onChange={e=>setNtfyInput(e.target.value)}
+                    onKeyDown={e=>e.key==="Enter"&&testNtfy()}
+                    placeholder="Your unique topic (e.g. satyam-tracker-2025)"
+                    style={{ ...inputStyle, padding:"8px 12px", flex:1 }}
+                  />
+                  <button onClick={testNtfy} disabled={ntfyTest==="sending" || !ntfyInput.trim()}
+                    style={{ ...clayActive({ borderRadius:12 }), padding:"8px 14px", border:"none", color:"#fff", fontSize:10, fontWeight:700, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap",
+                      opacity: (!ntfyInput.trim() || ntfyTest==="sending") ? 0.5 : 1,
+                      background: ntfyTest==="ok" ? "#22C55E" : ntfyTest==="err" ? "#EF4444" : C.blue,
+                    }}>
+                    {ntfyTest==="sending" ? "Sending…" : ntfyTest==="ok" ? "Sent ✓" : ntfyTest==="err" ? "Failed ✗" : "Test"}
+                  </button>
+                </div>
+                <div style={{ ...T.label, marginBottom:6 }}>Setup steps</div>
+                {[
+                  "1. Install the ntfy app on your phone (iOS or Android)",
+                  "2. Tap + and subscribe to your topic name above",
+                  "3. Hit Test — you'll get a notification on your phone",
+                  "4. Done! Reminders fire whenever you leave this tab",
+                ].map((s,i,arr)=>(
+                  <div key={i} style={{ ...T.sub, padding:"5px 0", borderBottom:i<arr.length-1?`1px solid ${C.border}`:"none", lineHeight:1.7 }}>{s}</div>
+                ))}
+              </div>
+
               <div style={{ ...clayLight({ borderRadius:14 }), padding:14 }}>
                 <div style={{ ...T.label, marginBottom:8 }}>Phone setup — sleep mode</div>
                 {["iPhone: Clock → Alarm → 8:10 AM & 9:30 AM","Android: Clock → Alarm → Add both times","Label: Leave Home & Reach Office","Enable bypass in Focus / DND settings"].map((tip,i,arr)=>(
